@@ -1,104 +1,47 @@
-import { Router } from 'express';
-import { query } from '../config/db.js';
-import { signToken, requireAuth } from '../middleware/auth.js';
+import jwt from 'jsonwebtoken';
 
-const router = Router();
+const SECRET = process.env.JWT_SECRET || 'pcs-jwt-secret-change-in-production';
+const EXPIRY  = '8h';
 
-// ── POST /api/auth/login ──────────────────────────────────────────
-router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password)
-    return res.status(400).json({ error: 'Username and password required' });
+// ── Token helpers ────────────────────────────────────────────────
+export function signToken(payload) {
+  return jwt.sign(payload, SECRET, { expiresIn: EXPIRY });
+}
+
+export function verifyToken(token) {
+  return jwt.verify(token, SECRET);
+}
+
+// ── Express middleware: require valid JWT ────────────────────────
+export function requireAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token  = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+  if (!token) return res.status(401).json({ error: 'No token provided' });
 
   try {
-    const { rows } = await query(
-      `SELECT u.*,
-              (SELECT COUNT(*) > 0 FROM users m WHERE m.manager_id = u.id AND m.is_active = TRUE) AS is_manager
-       FROM users u
-       WHERE u.username = $1 AND u.is_active = TRUE`,
-      [username]
-    );
-
-    const user = rows[0];
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
-    // ── PLAIN TEXT CHECK ──
-    const match = (password === user.password_hash); 
-    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const payload = {
-      id:                   user.id,
-      username:             user.username,
-      full_name:            user.full_name,
-      is_admin:             user.is_admin,
-      system_functions:     user.system_functions,
-      employee_code:        user.employee_code,
-      manager_id:           user.manager_id,
-      fund_limit:           user.fund_limit,
-      fund_active:          user.fund_active,
-      default_project_code: user.default_project_code,
-      is_manager:           user.is_manager,
-      must_change_pw:       user.must_change_pw,
-    };
-
-    const token = signToken(payload);
-    return res.json({ token, user: payload });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
+    req.user = verifyToken(token);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
-});
+}
 
-// ── POST /api/auth/change-password ───────────────────────────────
-router.post('/change-password', requireAuth, async (req, res) => {
-  const { current_password, new_password } = req.body;
-  if (!new_password || new_password.length < 6)
-    return res.status(400).json({ error: 'New password must be at least 6 characters' });
+// ── Role guards ──────────────────────────────────────────────────
+export function requireAdmin(req, res, next) {
+  if (!req.user?.is_admin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+}
 
-  try {
-    const { rows } = await query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
-    const user = rows[0];
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    if (!req.user.must_change_pw) {
-      if (!current_password) return res.status(400).json({ error: 'Current password required' });
-      // ── PLAIN TEXT CHECK ──
-      const match = (current_password === user.password_hash);
-      if (!match) return res.status(401).json({ error: 'Current password incorrect' });
+export function requireRole(...roles) {
+  return (req, res, next) => {
+    const userFunctions = req.user?.system_functions || [];
+    const hasRole = req.user?.is_admin || roles.some(r => userFunctions.includes(r));
+    if (!hasRole) {
+      return res.status(403).json({ error: `Required role: ${roles.join(' or ')}` });
     }
-
-    // ── PLAIN TEXT UPDATE ──
-    await query(
-      'UPDATE users SET password_hash = $1, must_change_pw = FALSE WHERE id = $2',
-      [new_password, req.user.id]
-    );
-
-    return res.json({ message: 'Password changed successfully' });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ── GET /api/auth/me ──────────────────────────────────────────────
-router.get('/me', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await query(
-      `SELECT u.*,
-              (SELECT COUNT(*) > 0 FROM users m WHERE m.manager_id = u.id AND m.is_active = TRUE) AS is_manager
-       FROM users u WHERE u.id = $1 AND u.is_active = TRUE`,
-      [req.user.id]
-    );
-
-    const user = rows[0];
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    const { password_hash, ...safe } = user;
-    return res.json(safe);
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
-
-export default router;
+    next();
+  };
+}
