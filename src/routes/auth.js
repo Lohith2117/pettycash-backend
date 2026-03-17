@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import bcrypt from 'bcrypt';
 import { query } from '../config/db.js';
 import { signToken, requireAuth } from '../middleware/auth.js';
 
@@ -23,7 +22,8 @@ router.post('/login', async (req, res) => {
     const user = rows[0];
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const match = await bcrypt.compare(password, user.password_hash);
+    // ── PLAIN TEXT CHECK (Bypass Bcrypt) ──
+    const match = (password === user.password_hash);
     if (!match) return res.status(401).json({ error: 'Invalid credentials' });
 
     const payload = {
@@ -60,17 +60,18 @@ router.post('/change-password', requireAuth, async (req, res) => {
     const user = rows[0];
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // If not forced reset, verify current password
+    // If not forced reset, verify current password via plain text
     if (!req.user.must_change_pw) {
       if (!current_password) return res.status(400).json({ error: 'Current password required' });
-      const match = await bcrypt.compare(current_password, user.password_hash);
+      
+      const match = (current_password === user.password_hash);
       if (!match) return res.status(401).json({ error: 'Current password incorrect' });
     }
 
-    const hash = await bcrypt.hash(new_password, 10);
+    // ── PLAIN TEXT UPDATE (Bypass Bcrypt) ──
     await query(
       'UPDATE users SET password_hash = $1, must_change_pw = FALSE WHERE id = $2',
-      [hash, req.user.id]
+      [new_password, req.user.id]
     );
 
     return res.json({ message: 'Password changed successfully' });
