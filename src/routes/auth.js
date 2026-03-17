@@ -7,6 +7,10 @@ const router = Router();
 // ── POST /api/auth/login ──────────────────────────────────────────
 router.post('/login', async (req, res) => {
   const { username, password } = req.body;
+  
+  // LOG: See exactly what the frontend is sending
+  console.log(`DEBUG: Login attempt - User: [${username}] Pass: [${password}]`);
+
   if (!username || !password)
     return res.status(400).json({ error: 'Username and password required' });
 
@@ -15,16 +19,27 @@ router.post('/login', async (req, res) => {
       `SELECT u.*,
               (SELECT COUNT(*) > 0 FROM users m WHERE m.manager_id = u.id AND m.is_active = TRUE) AS is_manager
        FROM users u
-       WHERE u.username = $1 AND u.is_active = TRUE`,
+       WHERE TRIM(u.username) = TRIM($1) AND u.is_active = TRUE`,
       [username]
     );
 
     const user = rows[0];
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // ── PLAIN TEXT CHECK (Bypass Bcrypt) ──
-    const match = (password === user.password_hash);
-    if (!match) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user) {
+      console.log(`DEBUG: User [${username}] not found in DB or is inactive.`);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // LOG: See exactly what the database retrieved
+    console.log(`DEBUG: DB User Found - Username: [${user.username}] DB_Pass: [${user.password_hash}]`);
+
+    // Clean comparison: remove any accidental whitespace from both sides
+    const match = (password.trim() === user.password_hash.trim());
+
+    if (!match) {
+      console.log(`DEBUG: Password mismatch. Received: [${password.trim()}], Expected: [${user.password_hash.trim()}]`);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
 
     const payload = {
       id:                   user.id,
@@ -42,9 +57,11 @@ router.post('/login', async (req, res) => {
     };
 
     const token = signToken(payload);
+    console.log(`DEBUG: Login SUCCESS for ${username}`);
     return res.json({ token, user: payload });
+
   } catch (err) {
-    console.error(err);
+    console.error("DEBUG: CRITICAL DATABASE ERROR:", err);
     return res.status(500).json({ error: 'Server error' });
   }
 });
@@ -60,18 +77,16 @@ router.post('/change-password', requireAuth, async (req, res) => {
     const user = rows[0];
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // If not forced reset, verify current password via plain text
     if (!req.user.must_change_pw) {
       if (!current_password) return res.status(400).json({ error: 'Current password required' });
       
-      const match = (current_password === user.password_hash);
+      const match = (current_password.trim() === user.password_hash.trim());
       if (!match) return res.status(401).json({ error: 'Current password incorrect' });
     }
 
-    // ── PLAIN TEXT UPDATE (Bypass Bcrypt) ──
     await query(
       'UPDATE users SET password_hash = $1, must_change_pw = FALSE WHERE id = $2',
-      [new_password, req.user.id]
+      [new_password.trim(), req.user.id]
     );
 
     return res.json({ message: 'Password changed successfully' });
